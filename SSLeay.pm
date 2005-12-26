@@ -1,7 +1,11 @@
 # Net::SSLeay.pm - Perl module for using Eric Young's implementation of SSL
 #
 # Copyright (c) 1996-2003 Sampo Kellomaki <sampo@iki.fi>, All Rights Reserved.
-# $Id: SSLeay.pm,v 1.26 2003/08/17 07:44:47 sampo Exp $
+# Copyright (C) 2005 Florian Ragwitz <rafl@debian.org>, All Rights Reserved.
+# Copyright (C) 2005 Mike McCauley <mikem@open.com.au>, All Rights Reserved.
+#
+# $Id: /local/net-ssleay/trunk/SSLeay.pm 23905 2005-12-21T03:27:18.584986Z rafl  $
+#
 # Version 1.04, 31.3.1999
 # 30.7.1999, Tracking OpenSSL-0.9.3a changes, --Sampo
 # 31.7.1999, version 1.05 --Sampo
@@ -43,6 +47,11 @@
 #            Kim Minh Kaplan <kmkaplan@selfoffice._com>
 # 17.8.2003, added http support :-) --Sampo
 # 17.8.2003, started 1.25 dev --Sampo
+# 30.11.2005, Applied a patch by Peter Behroozi that adds get1_session() for session caching --Florian
+# 30.11.2005, Applied a patch by ex8k-hbn@asahi-net.or.jp that limits the chunk size for tcp_read_all --Florian
+# 30.11.2005, Applied a patch by ivan-cpan-rt@420.am that avoids adding a Host header if an own is specified in do_httpx3
+# 13.12.2005, Added comments re thread safety and resetting of default_passwd_callback after use 
+#             --mikem@open.com.au
 #
 # The distribution and use of this module are subject to the conditions
 # listed in LICENSE file at the root of OpenSSL-0.9.7b
@@ -98,7 +107,7 @@ $Net::SSLeay::slowly = 0;
 $Net::SSLeay::random_device = '/dev/urandom';
 $Net::SSLeay::how_random = 512;
 
-$VERSION = '1.25';
+$VERSION = '1.30';
 @ISA = qw(Exporter DynaLoader);
 @EXPORT_OK = qw(
 	AT_MD5_WITH_RSA_ENCRYPTION
@@ -923,8 +932,6 @@ C language OpenSSL in this respect.
 
 =head2 Callbacks
 
-WARNING: as of 1.04 the callbacks have changed and have not been tested.
-
 At this moment the implementation of verify_callback is crippeled in
 the sense that at any given time there can be only one call back which
 is shared by all SSL contexts, sessions and connections. This is
@@ -965,10 +972,16 @@ like this:
         Net::SSLeay::CTX_use_PrivateKey_file($ctx, "key.pem",
 					     Net::SSLeay::FILETYPE_PEM)
             or die "Error reading private key";
+        Net::SSLeay::CTX_set_default_passwd_cb($ctx, undef);
 
 No other callbacks are implemented. You do not need to use any
 callback for simple (i.e. normal) cases where the SSLeay built-in
 verify mechanism satisfies your needs.
+
+It is desirable to reset these callbacks to undef immediately after use to prevent 
+thread safety problems and crashes on exit that can occur if different threads 
+set different callbacks.
+
 ---- end inaccurate ----
 
 If you want to use callback stuff, see examples/callback.pl! Its the
@@ -1423,9 +1436,13 @@ Password is being asked for private key
 
 =head1 REPORTING BUGS AND SUPPORT
 
-Please see README for full bug reporting instructions. In general I do
-not answer for free stupid questions or questions where you did not
-do your home work.
+Bug reports, patch submission, feature requests, subversion access to the latest 
+source code etc can be obtained at 
+http://alioth.debian.org/projects/net-ssleay
+
+The developer mailing list (for people interested in contributin to the source code)
+can be found at 
+http://lists.alioth.debian.org/mailman/listinfo/net-ssleay-devel
 
 Commercial support for Net::SSLeay may be obtained from
 
@@ -1456,16 +1473,14 @@ believe it would build with any perl5.002 or newer.
 
 =head1 AUTHOR
 
-Sampo Kellomäki <sampo@symlabs.com>
-
-Please send bug reports to the above address. General questions should be
-sent either to me or to the mailing list (subscribe by sending mail
-to openssl-users-request@openssl.org or using web interface at
-http://www.openssl.org/support/).
+Originally written by Sampo Kellomäki <sampo@symlabs.com>
+Maintained by Mike McCauley and Florian Ragwitz since November 2005
 
 =head1 COPYRIGHT
 
 Copyright (c) 1996-2003 Sampo Kellomäki <sampo@symlabs.com>
+Copyright (C) 2005 Florian Ragwitz <rafl@debian.org>
+Copyright (C) 2005 Mike McCauley <mikem@open.com.au>
 All Rights Reserved.
 
 Distribution and use of this module is under the same terms as the
@@ -1609,8 +1624,9 @@ sub tcp_read_all {
     my ($n, $got, $errs);
     my $reply = '';
 
+    my $bsize = 0x10000;
     while ($how_much > 0) {
-	$n = sysread(SSLCAT_S,$got,$how_much);
+	$n = sysread(SSLCAT_S,$got, (($bsize < $how_much) ? $bsize : $how_much));
 	warn "Read error: $! ($n,$how_much)" unless defined $n;
 	last if !$n;  # EOF
 	$how_much -= $n;
@@ -2204,8 +2220,15 @@ sub do_httpx3 {
     } else {
 	$content = "$CRLF$CRLF";
     }
-    my $req = "$method $path HTTP/1.0$CRLF"."Host: $site:$port$CRLF"
-      . (defined $headers ? $headers : '') . "Accept: */*$CRLF$content";    
+    my $req = "$method $path HTTP/1.0$CRLF";
+    unless (defined $headers && $headers =~ /^Host:/m) {
+        $req .= "Host: $site";
+        unless (($port == 80 && !$usessl) || ($port == 443 && $usessl)) {
+            $req .= ":$port";
+        }
+        $req .= $CRLF;
+	}
+    $req .= (defined $headers ? $headers : '') . "Accept: */*$CRLF$content";    
 
     warn "do_httpx3($method,$usessl,$site:$port)" if $trace;
     my ($http, $errs, $server_cert)

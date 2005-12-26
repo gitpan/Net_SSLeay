@@ -8,7 +8,7 @@
 # 20.8.2001, tweaked path editing, thanks to Gordon Lack
 #            <gml4410@@ggr.co.uk> --Sampo
 # 19.4.2003, applied some RH9 fixes from priit.randla@eyp._ee --Sampo
-# $Id: Makefile.PL,v 1.13 2003/06/13 21:14:39 sampo Exp $
+# $Id: /local/net-ssleay/trunk/Makefile.PL 23170 2005-12-09T10:41:41.212640Z rafl  $
 #
 # Configuration script for Net::SSLeay.pm
 
@@ -113,7 +113,7 @@ close F;
 
 if ($windows) {
     warn "RSAREF build on Windows not supported out of box" if $rsaref;
-    $libs = "-llibeay32 -lssleay32";
+    $libs = "-L$openssl_path/lib/VC -llibeay32 -lssleay32";
 
     warn "Be sure to use the same compiler and options to compile your OpenSSL, perl, and Net::SSLeay. Mixing and matching compilers is not supported. (Currently I do not have a way to check this on Windows platform.)\n";
 } else {

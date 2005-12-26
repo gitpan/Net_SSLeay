@@ -1,6 +1,9 @@
 /* SSLeay.xs - Perl module for using Eric Young's implementation of SSL
  *
  * Copyright (c) 1996-2002 Sampo Kellomaki <sampo@iki.fi>
+ * Copyright (C) 2005 Florian Ragwitz <rafl@debian.org>
+ * Copyright (C) 2005 Mike McCauley <mikem@open.com.au>
+ * 
  * All Rights Reserved.
  *
  * 19.6.1998, Maintenance release to sync with SSLeay-0.9.0, --Sampo
@@ -42,8 +45,21 @@
  * 18.2.2003, RAND patch from Toni Andjelkovic <toni@soth._at>
  * 13.6.2003, applied SSL_X509_LOOKUP patch by Marian Jancar <mjancar@suse._cz>
  * 18.8.2003, fixed some const char pointer warnings --Sampo
+ * 01.12.2005 fixed a thread safety problem with SvSetSV that could cause crashes
+ *            if SSL_CTX_set_default_passwd_cb and friends were called multiple
+ *            times in different threads.
+ *	      Reintroduced X509_STORE_set_flags, also added
+ *	      X509_STORE_set_purpose and X509_STORE_set_trust
+ *	      Added X509_get_subjectAltNames and a number of other openssl
+ *            X509 functions: X509_get_ext_by_NID X509_get_ext
+ *	      X509V3_EXT_d2i
+ *	      X509_verify_cert_error_string
+ *            --mikem@open.com_.au
+ * 13.12.2005 Reinstated the thread safety fix from 01.12.2005 due memory leaks
+ *	      It is better to reset the callback with undef after use to prevent
+ *	      leaks and thread safety problems.
  *
- * $Id: SSLeay.xs,v 1.14 2003/06/13 21:14:40 sampo Exp $
+ * $Id: /local/net-ssleay/trunk/SSLeay.xs 23622 2005-12-15T17:06:53.653886Z rafl  $
  * 
  * The distribution and use of this module are subject to the conditions
  * listed in LICENSE file at the root of OpenSSL-0.9.6b
@@ -90,6 +106,9 @@ extern "C" {
 #include <openssl/ssl.h>
 #include <openssl/comp.h>    /* openssl-0.9.6a forgets to include this */
 #include <openssl/md5.h>     /* openssl-SNAP-20020227 does not automatically include this */
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+
 /* Debugging output */
 
 #if 0
@@ -1805,16 +1824,14 @@ SSL_CTX_set_verify(ctx,mode,callback)
      int                mode
      SV *               callback
      CODE:
-     if (ssleay_ctx_verify_callback == (SV*)NULL) {
+     if (ssleay_ctx_verify_callback == (SV*)NULL)
         ssleay_ctx_verify_callback = newSVsv(callback);
-     } else {
+     else
          SvSetSV (ssleay_ctx_verify_callback, callback);
-     }
-     if (SvTRUE(ssleay_ctx_verify_callback)) {
+     if (SvTRUE(ssleay_ctx_verify_callback))
          SSL_CTX_set_verify(ctx,mode,&ssleay_ctx_verify_callback_glue);
-     } else {
+     else
          SSL_CTX_set_verify(ctx,mode,NULL);
-     }
 
 int
 SSL_get_error(s,ret)
@@ -2134,11 +2151,10 @@ SSL_set_verify(s,mode,callback)
          ssleay_verify_callback = newSVsv(callback);
      else
          SvSetSV (ssleay_verify_callback, callback);
-     if (SvTRUE(ssleay_verify_callback)) {
+     if (SvTRUE(ssleay_verify_callback))
          SSL_set_verify(s,mode,&ssleay_verify_callback_glue);
-     } else {
+     else
          SSL_set_verify(s,mode,NULL);
-     }
 
 void
 SSL_set_bio(s,rbio,wbio)
@@ -2180,13 +2196,17 @@ SSL_set_session(to,ses)
 SSL_SESSION *
 d2i_SSL_SESSION(a,pp,length)
      SSL_SESSION *      &a
-     unsigned char *    &pp
+     const unsigned char *    &pp
      long               length
 
 #define REM30 "SSLeay-0.9.0 defines these as macros. I expand them here for safety's sake"
 
 SSL_SESSION *
 SSL_get_session(s)
+     SSL *              s
+
+SSL_SESSION *
+SSL_get1_session(s)
      SSL *              s
 
 X509 *
@@ -2361,7 +2381,7 @@ RAND_bytes(buf, num)
     CODE:
         New(0, random, num, unsigned char);
         rc = RAND_bytes(random, num);
-        sv_setpvn(buf, random, num);
+        sv_setpvn(buf, (const char*)random, num);
         Safefree(random);
         RETVAL = rc;
     OUTPUT:
@@ -2377,7 +2397,7 @@ RAND_pseudo_bytes(buf, num)
     CODE:
         New(0, random, num, unsigned char);
         rc = RAND_pseudo_bytes(random, num);
-        sv_setpvn(buf, random, num);
+        sv_setpvn(buf, (const char*)random, num);
         Safefree(random);
         RETVAL = rc;
     OUTPUT:
@@ -2485,6 +2505,44 @@ X509_STORE_CTX_get_ex_data(x509_store_ctx,idx)
      X509_STORE_CTX * x509_store_ctx
      int idx
 
+void
+X509_get_subjectAltNames(cert)
+     X509 *      cert
+     PPCODE:
+     int                    i, j = 0;
+     X509_EXTENSION         *subjAltNameExt = NULL;
+     STACK_OF(GENERAL_NAME) *subjAltNameDNs = NULL;
+     GENERAL_NAME           *subjAltNameDN  = NULL;
+     int                    num_gnames;
+     if (  (i = X509_get_ext_by_NID(cert, NID_subject_alt_name, -1))
+         && (subjAltNameExt = X509_get_ext(cert, i))
+	 && (subjAltNameDNs = X509V3_EXT_d2i(subjAltNameExt)))
+     {
+         num_gnames = sk_GENERAL_NAME_num(subjAltNameDNs);
+	 for (j = 0; j < num_gnames; j++) 
+	 {
+	    subjAltNameDN = sk_GENERAL_NAME_value(subjAltNameDNs, j);
+	    XPUSHs(sv_2mortal(newSViv(subjAltNameDN->type)));
+	    XPUSHs(sv_2mortal(newSVpv((const char*)ASN1_STRING_data(subjAltNameDN->d.ia5), ASN1_STRING_length(subjAltNameDN->d.ia5))));
+	 }
+     }
+     XSRETURN(j*2);
+
+int
+X509_get_ext_by_NID(x,nid,loc)
+	X509* x
+	int nid
+	int loc
+
+X509_EXTENSION *
+X509_get_ext(x,loc)
+	X509* x
+	int loc
+	
+void *
+X509V3_EXT_d2i(ext)
+	X509_EXTENSION *ext
+
 int
 X509_STORE_CTX_get_error(x509_store_ctx)
      X509_STORE_CTX * 	x509_store_ctx
@@ -2524,6 +2582,21 @@ X509_STORE_CTX_set_flags(ctx, flags)
     X509_STORE_CTX *ctx
     long flags
 
+void 
+X509_STORE_set_flags(ctx, flags)
+    X509_STORE *ctx
+    long flags
+
+void 
+X509_STORE_set_purpose(ctx, purpose)
+    X509_STORE *ctx
+    int purpose
+
+void 
+X509_STORE_set_trust(ctx, trust)
+    X509_STORE *ctx
+    int trust
+
 int 
 X509_load_cert_file(ctx, file, type)
     X509_LOOKUP *ctx
@@ -2541,6 +2614,10 @@ X509_load_cert_crl_file(ctx, file, type)
     X509_LOOKUP *ctx
     char *file
     int type
+
+const char *
+X509_verify_cert_error_string(n)
+    long n   
 
 
 ASN1_UTCTIME *
@@ -2601,7 +2678,7 @@ MD5(data)
      CODE:
      ret = MD5(data,len,md);
      if (ret!=NULL) {
-	  XSRETURN_PV((char *) md);
+	  XSRETURN_PVN((char *) md, 16);
      } else {
 	  XSRETURN_UNDEF;
      }
@@ -2808,16 +2885,14 @@ SSL_CTX_set_default_passwd_cb(ctx,cb)
     	SSL_CTX *	ctx
 	SV * cb
 	CODE:
-     if (ssleay_ctx_set_default_passwd_cb_callback == (SV*)NULL) {
+     if (ssleay_ctx_set_default_passwd_cb_callback == (SV*)NULL)
         ssleay_ctx_set_default_passwd_cb_callback = newSVsv(cb);
-     } else {
+     else
          SvSetSV (ssleay_ctx_set_default_passwd_cb_callback, cb);
-     }
-     if (SvTRUE(ssleay_ctx_set_default_passwd_cb_callback)) {
+     if (SvTRUE(ssleay_ctx_set_default_passwd_cb_callback))
          SSL_CTX_set_default_passwd_cb(ctx,&ssleay_ctx_set_default_passwd_cb_callback_glue);
-     } else {
+     else
          SSL_CTX_set_default_passwd_cb(ctx,NULL);
-     }
 
 void 
 SSL_CTX_set_default_passwd_cb_userdata(ctx,u)
@@ -3398,21 +3473,21 @@ SSL_SESSION_get_master_key(s)
      SSL_SESSION *   s
      CODE:
      ST(0) = sv_newmortal();   /* Undefined to start with */
-     sv_setpvn(ST(0), s->master_key, s->master_key_length);
+     sv_setpvn(ST(0), (const char*)s->master_key, s->master_key_length);
 
 void
 SSL_get_client_random(s)
      SSL *   s
      CODE:
      ST(0) = sv_newmortal();   /* Undefined to start with */
-     sv_setpvn(ST(0), s->s3->client_random, SSL3_RANDOM_SIZE);
+     sv_setpvn(ST(0), (const char*)s->s3->client_random, SSL3_RANDOM_SIZE);
 
 void
 SSL_get_server_random(s)
      SSL *   s
      CODE:
      ST(0) = sv_newmortal();   /* Undefined to start with */
-     sv_setpvn(ST(0), s->s3->server_random, SSL3_RANDOM_SIZE);
+     sv_setpvn(ST(0), (const char*)s->s3->server_random, SSL3_RANDOM_SIZE);
 
 
 #define REM_EOF "/* EOF - SSLeay.xs */"
